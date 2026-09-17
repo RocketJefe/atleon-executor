@@ -68,14 +68,18 @@ def send_telegram(chat_id, text):
 
 def run_polling():
     print(f"[TG] Iniciando polling para bot token: {BOT_TOKEN[:10]}...")
-    requests.get(f"{TG_API}/deleteWebhook?drop_pending_updates=True", timeout=5)
+    try:
+        requests.get(f"{TG_API}/deleteWebhook?drop_pending_updates=True", timeout=15)
+    except Exception as e:
+        print(f"[TG SETUP WARN] {e}")
+
     last_update_id = 0
     while True:
         try:
-            url = f"{TG_API}/getUpdates?offset={last_update_id + 1}&timeout=10"
-            res = requests.get(url, timeout=15).json()
+            url = f"{TG_API}/getUpdates?offset={last_update_id + 1}&timeout=20"
+            res = requests.get(url, timeout=25).json()
             if not res.get("ok"):
-                print(f"[TG ERROR RESP] {res}")
+                print(f"[TG WARN] Respuesta no OK: {res}")
                 time.sleep(2)
                 continue
 
@@ -87,7 +91,7 @@ def run_polling():
 
                 chat_id = msg["chat"]["id"]
                 text = msg["text"].strip()
-                print(f"[TG IN] Comando recibido: {text} desde {chat_id}")
+                print(f"[TG IN] Recibido: {text}")
 
                 if text.startswith("/status"):
                     status_dot = "🟢 Conectado" if is_connected else "🟡 Requiere actualización de SSID"
@@ -100,9 +104,17 @@ def run_polling():
                     )
                     send_telegram(chat_id, reply)
 
+                elif "ALERTA GHOST STRIKE" in text:
+                    direction = "CALL" if "ACCION: CALL" in text else "PUT"
+                    send_telegram(chat_id, f"⚡️ Ejecutando orden {direction} EURUSD en Exnova...")
+                    execute_strike("EURUSD", direction, duration=30)
+
+        except requests.exceptions.RequestException as re:
+            print(f"[TG TIMEOUT/NETWORK] Conexión lenta o reintentando: {re}")
+            time.sleep(3)
         except Exception as e:
-            print(f"[POLL LOOP ERROR] {e}")
-            time.sleep(2)
+            print(f"[POLL UNEXPECTED ERROR] {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
     # 1. Health check en hilo
