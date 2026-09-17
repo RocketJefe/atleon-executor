@@ -37,16 +37,34 @@ def on_message(ws, message):
     try:
         data = json.loads(message)
         msg_name = data.get("name")
+        
+        # 1. Autenticación exitosa
         if msg_name == "profile":
             is_connected = True
-            balances = data.get("msg", {}).get("balances", [])
-            target_type = 4 if ACCOUNT_TYPE == "PRACTICE" else 1
+            msg = data.get("msg", {})
+            balances = msg.get("balances", [])
+            
+            # Buscar el balance de práctica (generalmente type 4 o el que tenga mayor saldo demo)
             for b in balances:
-                if b.get("type") == target_type:
+                b_type = b.get("type")
+                # Si estamos en PRACTICE buscamos type 4, o si es REAL buscamos type 1
+                if ACCOUNT_TYPE == "PRACTICE" and (b_type == 4 or "demo" in str(b).lower()):
                     balance_val = float(b.get("amount", 0.0))
-                    print(f"[EXNOVA] Autenticado OK. Balance ({ACCOUNT_TYPE}): ${balance_val:.2f}")
-        elif msg_name == "option-opened":
-            print(f"[EXNOVA] Orden confirmada: {data.get('msg')}")
+                    print(f"[EXNOVA] Balance PRACTICE detectado: ${balance_val:.2f}")
+                    break
+                elif ACCOUNT_TYPE != "PRACTICE" and b_type == 1:
+                    balance_val = float(b.get("amount", 0.0))
+                    print(f"[EXNOVA] Balance REAL detectado: ${balance_val:.2f}")
+                    break
+            
+            # Fallback si no encontró por tipo específico: tomar msg.balance o el primer saldo disponible
+            if balance_val == 0.0 and balances:
+                balance_val = float(balances[0].get("amount", 0.0))
+
+        # 2. Confirmación de orden abierta
+        elif msg_name in ["option-opened", "order-placed-temp"]:
+            print(f"[EXNOVA] ¡ORDEN DISPARADA CON ÉXITO! -> {data.get('msg')}")
+
     except Exception as e:
         print(f"[WS ERROR] {e}")
 
