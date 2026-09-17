@@ -18,6 +18,7 @@ WS_URL = "wss://ws.iqoption.com/echo/websocket"
 ws_app = None
 is_connected = False
 balance_val = 0.0
+user_balance_id = None
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -33,36 +34,26 @@ def run_health():
     server.serve_forever()
 
 def on_message(ws, message):
-    global is_connected, balance_val
+    global is_connected, balance_val, user_balance_id
     try:
         data = json.loads(message)
         msg_name = data.get("name")
         
-        # 1. Autenticación exitosa
         if msg_name == "profile":
             is_connected = True
-            msg = data.get("msg", {})
-            balances = msg.get("balances", [])
-            
-            # Buscar el balance de práctica (generalmente type 4 o el que tenga mayor saldo demo)
+            balances = data.get("msg", {}).get("balances", [])
+            target_type = 4 if ACCOUNT_TYPE == "PRACTICE" else 1
             for b in balances:
-                b_type = b.get("type")
-                # Si estamos en PRACTICE buscamos type 4, o si es REAL buscamos type 1
-                if ACCOUNT_TYPE == "PRACTICE" and (b_type == 4 or "demo" in str(b).lower()):
+                if b.get("type") == target_type:
                     balance_val = float(b.get("amount", 0.0))
-                    print(f"[EXNOVA] Balance PRACTICE detectado: ${balance_val:.2f}")
+                    user_balance_id = b.get("id")
+                    print(f"[EXNOVA] Autenticado OK | Saldo {ACCOUNT_TYPE}: ${balance_val:.2f} | Balance ID: {user_balance_id}")
                     break
-                elif ACCOUNT_TYPE != "PRACTICE" and b_type == 1:
-                    balance_val = float(b.get("amount", 0.0))
-                    print(f"[EXNOVA] Balance REAL detectado: ${balance_val:.2f}")
-                    break
-            
-            # Fallback si no encontró por tipo específico: tomar msg.balance o el primer saldo disponible
             if balance_val == 0.0 and balances:
                 balance_val = float(balances[0].get("amount", 0.0))
+                user_balance_id = balances[0].get("id")
 
-        # 2. Confirmación de orden abierta
-        elif msg_name in ["option-opened", "order-placed-temp"]:
+        elif msg_name in ["option-opened", "order-placed-temp", "position-opened"]:
             print(f"[EXNOVA] ¡ORDEN DISPARADA CON ÉXITO! -> {data.get('msg')}")
 
     except Exception as e:
@@ -77,10 +68,37 @@ def start_ws():
     ws_app = websocket.WebSocketApp(WS_URL, on_open=on_open, on_message=on_message)
     ws_app.run_forever()
 
+def execute_strike(active, direction, duration=30):
+    if not is_connected or not ws_app:
+        print("[ERROR] No se puede ejecutar: WebSocket no autenticado")
+        return False
+
+    dir_clean = "call" if direction.upper() in ["CALL", "HIGHER", "BUY"] else "put"
+    print(f"[STRIKE] Disparando {dir_clean.upper()} en {active} por ${TRADE_AMOUNT} ({duration}s)...")
+    
+    # 1. Intentar apertura por Blitz / Turbo
+    payload = {
+        "name": "sendMessage",
+        "msg": {
+            "name": "binary-options.open-option",
+            "version": "1.0",
+            "body": {
+                "user_balance_id": user_balance_id,
+                "active_id": 1,  # 1 = EURUSD
+                "option_type_id": 3,  # Turbo / Blitz
+                "direction": dir_clean,
+                "expired": int(time.time()) + duration,
+                "price": TRADE_AMOUNT,
+                "profit_percent": 87
+            }
+        }
+    }
+    ws_app.send(json.dumps(payload))
+    return True
+
 def send_telegram(chat_id, text):
     try:
-        r = requests.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=5)
-        print(f"[TG OUT] Mensaje enviado a {chat_id}: {r.status_code}")
+        requests.post(f"{TG_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=5)
     except Exception as e:
         print(f"[TG ERROR] {e}")
 
@@ -97,7 +115,6 @@ def run_polling():
             url = f"{TG_API}/getUpdates?offset={last_update_id + 1}&timeout=20"
             res = requests.get(url, timeout=25).json()
             if not res.get("ok"):
-                print(f"[TG WARN] Respuesta no OK: {res}")
                 time.sleep(2)
                 continue
 
@@ -109,7 +126,7 @@ def run_polling():
 
                 chat_id = msg["chat"]["id"]
                 text = msg["text"].strip()
-                print(f"[TG IN] Recibido: {text}")
+                print(f"[TG IN] {text}")
 
                 if text.startswith("/status"):
                     status_dot = "🟢 Conectado" if is_connected else "🟡 Requiere actualización de SSID"
@@ -128,17 +145,14 @@ def run_polling():
                     execute_strike("EURUSD", direction, duration=30)
 
         except requests.exceptions.RequestException as re:
-            print(f"[TG TIMEOUT/NETWORK] Conexión lenta o reintentando: {re}")
-            time.sleep(3)
+            print(f"[TG TIMEOUT/NETWORK] Reintentando: {re}")
+            time.sleep(2)
         except Exception as e:
             print(f"[POLL UNEXPECTED ERROR] {e}")
-            time.sleep(3)
+            time.sleep(2)
 
 if __name__ == "__main__":
-    # 1. Health check en hilo
     threading.Thread(target=run_health, daemon=True).start()
-    # 2. Exnova WebSocket en hilo
     threading.Thread(target=start_ws, daemon=True).start()
-    # 3. Polling en proceso principal para evitar que muera
     time.sleep(2)
     run_polling()
