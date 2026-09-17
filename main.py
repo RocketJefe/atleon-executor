@@ -18,7 +18,7 @@ WS_URL = "wss://ws.iqoption.com/echo/websocket"
 ws_app = None
 is_connected = False
 balance_val = 0.0
-user_balance_id = None
+active_balance_id = None
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -33,8 +33,24 @@ def run_health():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     server.serve_forever()
 
+def set_broker_balance(balance_id):
+    """Fuerza al broker a sincronizar esta cuenta como la activa en la sesión"""
+    if ws_app and balance_id:
+        sync_payload = {
+            "name": "sendMessage",
+            "msg": {
+                "name": "internal-billing.set-active-balance",
+                "version": "1.0",
+                "body": {
+                    "balance_id": balance_id
+                }
+            }
+        }
+        ws_app.send(json.dumps(sync_payload))
+        print(f"[EXNOVA] Cuenta activa fijada en broker: Balance ID {balance_id}")
+
 def on_message(ws, message):
-    global is_connected, balance_val, user_balance_id
+    global is_connected, balance_val, active_balance_id
     try:
         data = json.loads(message)
         msg_name = data.get("name")
@@ -43,24 +59,24 @@ def on_message(ws, message):
             is_connected = True
             balances = data.get("msg", {}).get("balances", [])
             target_type = 4 if ACCOUNT_TYPE == "PRACTICE" else 1
+            
             for b in balances:
                 if b.get("type") == target_type:
                     balance_val = float(b.get("amount", 0.0))
-                    user_balance_id = b.get("id")
-                    print(f"[EXNOVA] Autenticado OK | Saldo {ACCOUNT_TYPE}: ${balance_val:.2f} | Balance ID: {user_balance_id}")
+                    active_balance_id = int(b.get("id"))
+                    print(f"[EXNOVA] Detectada {ACCOUNT_TYPE} | Saldo: ${balance_val:.2f} | Balance ID: {active_balance_id}")
+                    # Amarrar el balance en el broker de inmediato
+                    set_broker_balance(active_balance_id)
                     break
-            if balance_val == 0.0 and balances:
-                balance_val = float(balances[0].get("amount", 0.0))
-                user_balance_id = balances[0].get("id")
 
         elif msg_name in ["option-opened", "order-placed-temp", "position-opened"]:
-            print(f"[EXNOVA] ¡ORDEN DISPARADA CON ÉXITO! -> {data.get('msg')}")
+            print(f"[EXNOVA] Posición confirmada visible en plataforma: {data.get('msg')}")
 
     except Exception as e:
         print(f"[WS ERROR] {e}")
 
 def on_open(ws):
-    print("[EXNOVA] WebSocket conectado. Enviando SSID...")
+    print("[EXNOVA] Conectando socket... Enviando SSID")
     ws.send(json.dumps({"name": "ssid", "msg": EXNOVA_SSID}))
 
 def start_ws():
@@ -69,21 +85,24 @@ def start_ws():
     ws_app.run_forever()
 
 def execute_strike(active, direction, duration=30):
-    if not is_connected or not ws_app:
-        print("[ERROR] No se puede ejecutar: WebSocket no autenticado")
+    global active_balance_id
+    if not is_connected or not ws_app or not active_balance_id:
+        print("[ERROR] No se puede ejecutar: Sesión o Balance ID no listos")
         return False
 
     dir_clean = "call" if direction.upper() in ["CALL", "HIGHER", "BUY"] else "put"
-    print(f"[STRIKE] Disparando {dir_clean.upper()} en {active} por ${TRADE_AMOUNT} ({duration}s)...")
+    print(f"[STRIKE] Abriendo orden en vivo: {dir_clean.upper()} en {active} (${TRADE_AMOUNT}) | ID Cuenta: {active_balance_id}")
     
-    # 1. Intentar apertura por Blitz / Turbo
+    # Asegurar el balance antes de colocar la orden
+    set_broker_balance(active_balance_id)
+
     payload = {
         "name": "sendMessage",
         "msg": {
             "name": "binary-options.open-option",
             "version": "1.0",
             "body": {
-                "user_balance_id": user_balance_id,
+                "user_balance_id": active_balance_id,
                 "active_id": 1,  # 1 = EURUSD
                 "option_type_id": 3,  # Turbo / Blitz
                 "direction": dir_clean,
@@ -103,7 +122,6 @@ def send_telegram(chat_id, text):
         print(f"[TG ERROR] {e}")
 
 def run_polling():
-    print(f"[TG] Iniciando polling para bot token: {BOT_TOKEN[:10]}...")
     try:
         requests.get(f"{TG_API}/deleteWebhook?drop_pending_updates=True", timeout=15)
     except Exception as e:
@@ -126,7 +144,6 @@ def run_polling():
 
                 chat_id = msg["chat"]["id"]
                 text = msg["text"].strip()
-                print(f"[TG IN] {text}")
 
                 if text.startswith("/status"):
                     status_dot = "🟢 Conectado" if is_connected else "🟡 Requiere actualización de SSID"
@@ -134,21 +151,20 @@ def run_polling():
                         f"📊 Estado Atleon Executor:\n"
                         f"• Conexión: {status_dot}\n"
                         f"• Saldo: ${balance_val:.2f}\n"
-                        f"• Cuenta: {ACCOUNT_TYPE}\n"
-                        f"• Monto por trade: ${TRADE_AMOUNT:.2f}"
+                        f"• Cuenta: {ACCOUNT_TYPE} (ID: {active_balance_id})\n"
+                        f"• Monto: ${TRADE_AMOUNT:.2f}"
                     )
                     send_telegram(chat_id, reply)
 
                 elif "ALERTA GHOST STRIKE" in text:
                     direction = "CALL" if "ACCION: CALL" in text else "PUT"
-                    send_telegram(chat_id, f"⚡️ Ejecutando orden {direction} EURUSD en Exnova...")
+                    send_telegram(chat_id, f"⚡️ Orden enviada {direction} EURUSD...")
                     execute_strike("EURUSD", direction, duration=30)
 
-        except requests.exceptions.RequestException as re:
-            print(f"[TG TIMEOUT/NETWORK] Reintentando: {re}")
+        except requests.exceptions.RequestException:
             time.sleep(2)
         except Exception as e:
-            print(f"[POLL UNEXPECTED ERROR] {e}")
+            print(f"[POLL ERROR] {e}")
             time.sleep(2)
 
 if __name__ == "__main__":
