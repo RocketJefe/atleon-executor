@@ -86,7 +86,7 @@ def start_ws():
             print(f"[WS RECONNECT] {e}")
         time.sleep(3)
 
-def execute_strike(active="EURUSD", direction="CALL", duration=30):
+def execute_strike(active="EURUSD", direction="CALL", duration=60):
     global active_balance_id, ws_app
     if not is_connected or not ws_app or not active_balance_id:
         print("[ERROR] No se puede ejecutar: WebSocket o Balance no listos.")
@@ -95,36 +95,24 @@ def execute_strike(active="EURUSD", direction="CALL", duration=30):
     dir_clean = "call" if direction.upper() in ["CALL", "HIGHER", "BUY"] else "put"
     now = int(time.time())
     
-    print(f"[DISPARO] Ejecutando orden {dir_clean.upper()} en {active} por ${TRADE_AMOUNT}...")
+    # Expiración limpia al minuto estándar (evita el Error 500 del broker)
+    exp_time = now + 60 - (now % 60)
+    if exp_time - now < 15:
+        exp_time += 60
 
-    # Formato Blitz nativo de Exnova
-    blitz_msg = {
-        "name": "sendMessage",
-        "msg": {
-            "name": "blitz-options.open-option",
-            "version": "1.0",
-            "body": {
-                "user_balance_id": active_balance_id,
-                "active_id": 1,
-                "direction": dir_clean,
-                "duration": duration,
-                "price": TRADE_AMOUNT
-            }
-        }
-    }
-    
-    # Formato Turbo/Binaria estandar
-    turbo_msg = {
+    print(f"[DISPARO] Abriendo posición {dir_clean.upper()} en {active} (${TRADE_AMOUNT}) | Bal ID: {active_balance_id} | Exp: {exp_time}")
+
+    payload = {
         "name": "sendMessage",
         "msg": {
             "name": "binary-options.open-option",
             "version": "1.0",
             "body": {
                 "user_balance_id": active_balance_id,
-                "active_id": 1,
-                "option_type_id": 3,
+                "active_id": 1,         # 1 = EUR/USD
+                "option_type_id": 3,    # Turbo
                 "direction": dir_clean,
-                "expired": now + duration,
+                "expired": exp_time,
                 "price": TRADE_AMOUNT,
                 "profit_percent": 85
             }
@@ -132,9 +120,8 @@ def execute_strike(active="EURUSD", direction="CALL", duration=30):
     }
 
     try:
-        ws_app.send(json.dumps(blitz_msg))
-        ws_app.send(json.dumps(turbo_msg))
-        print("[DISPARO] Paquetes de ejecucion transmitidos con exito a Exnova.")
+        ws_app.send(json.dumps(payload))
+        print("[DISPARO] Paquete transmitido a Exnova.")
         return True
     except Exception as e:
         print(f"[ERROR DISPARO] {e}")
